@@ -2,6 +2,8 @@
 
 This is a code repository used to reproduce the results in paper [DEEP GRADIENT COMPRESSION: REDUCING THE COMMUNICATION BANDWIDTH FOR DISTRIBUTED TRAINING](https://arxiv.org/pdf/1712.01887.pdf)
 It is based off [convNet.pytorch](https://github.com/eladhoffer/convNet.pytorch) with some helpful options such as:
+  - Simulate data parallel senario on multiple machines on one GPU
+  - Gradient pruning
   - Training on several datasets
   - Complete logging of trained experiment
   - Graph visualization of the training/validation loss and accuracy
@@ -52,3 +54,7 @@ class Model(nn.Module):
  def model(**kwargs):
         return Model()
 ```
+
+## Author
+Jiarui Fang 
+fjr14@mails.tsinghua.edu.cn
