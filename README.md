@@ -1,7 +1,6 @@
 # Train longer, generalize better - Big batch training
 
-This is a code repository used to generate the results appearing in ["Train longer, generalize better: closing the generalization gap in large batch training of neural networks"](https://arxiv.org/abs/1705.08741) By Elad Hoffer, Itay Hubara and Daniel Soudry.
-
+This is a code repository used to reproduce the results in paper [DEEP GRADIENT COMPRESSION: REDUCING THE COMMUNICATION BANDWIDTH FOR DISTRIBUTED TRAINING](https://arxiv.org/pdf/1712.01887.pdf)
 It is based off [convNet.pytorch](https://github.com/eladhoffer/convNet.pytorch) with some helpful options such as:
   - Training on several datasets
   - Complete logging of trained experiment
@@ -13,8 +12,6 @@ It is based off [convNet.pytorch](https://github.com/eladhoffer/convNet.pytorch)
 - [pytorch](<http://www.pytorch.org>)
 - [torchvision](<https://github.com/pytorch/vision>) to load the datasets, perform image transforms
 - [pandas](<http://pandas.pydata.org/>) for logging to csv
-- [bokeh](<http://bokeh.pydata.org>) for training visualization
-
 
 ## Data
 - Configure your dataset path at **data.py**.
@@ -22,11 +19,7 @@ It is based off [convNet.pytorch](https://github.com/eladhoffer/convNet.pytorch)
 
 ## Experiment examples
 ```bash
-python main_normal.py --dataset cifar10 --model resnet --save cifar10_resnet44_bs2048_lr_fix --epochs 100 --b 2048 --lr_bb_fix;
-python main_normal.py --dataset cifar10 --model resnet --save cifar10_resnet44_bs2048_regime_adaptation --epochs 100 --b 2048 --lr_bb_fix --regime_bb_fix;
-python main_gbn.py --dataset cifar10 --model resnet --save cifar10_resnet44_bs2048_ghost_bn256 --epochs 100 --b 2048 --lr_bb_fix --mini-batch-size 256;
-python main_normal.py --dataset cifar100 --model resnet --save cifar100_wresnet16_4_bs1024_regime_adaptation --epochs 100 --b 1024 --lr_bb_fix --regime_bb_fix;
-python main_gbn.py --model mnist_f1 --dataset mnist --save mnist_baseline_bs4096_gbn --epochs 50 --b 4096 --lr_bb_fix --no-regime_bb_fix --mini-batch-size 128;
+sh ./submit_pruning.sh
 ```
 - See *run_experiments.sh* for more examples
 ## Model configuration
