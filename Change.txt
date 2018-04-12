@@ -1,0 +1,4 @@
+./models/resnet.py delete momentum
+data.py path
+./utils.py delete unrecognized parts
+./main_gbn.py add pruning

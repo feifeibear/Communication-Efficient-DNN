@@ -189,8 +189,9 @@ class ResNet_cifar10(ResNet):
         init_model(self)
 
         self.regime = {
-            0: {'optimizer': 'SGD', 'lr':  1e-1,
-                'weight_decay': 1e-4, 'momentum': 0.9},
+            # 0: {'optimizer': 'SGD', 'lr':  1e-1,
+            #     'weight_decay': 1e-4, 'momentum': 0.9},
+            0: {'optimizer': 'SGD', 'lr':  1e-1},
             81: {'lr': 1e-2},
             122: {'lr':  1e-3, 'optimizer': 'SGD'},
             164: {'lr':  1e-4}

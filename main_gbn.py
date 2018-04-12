@@ -19,6 +19,9 @@ from utils import *
 from ast import literal_eval
 from torch.nn.utils import clip_grad_norm
 from math import ceil
+from math import sqrt
+import numpy as np
+from prune_utils.pruning import prune_perc, check_sparsity
 
 model_names = sorted(name for name in models.__dict__
                      if name.islower() and not name.startswith("__")
@@ -53,8 +56,6 @@ parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
 parser.add_argument('-b', '--batch-size', default=2048, type=int,
                     metavar='N', help='mini-batch size (default: 2048)')
-parser.add_argument('-mb', '--mini-batch-size', default=128, type=int,
-                    help='mini-mini-batch size (default: 64)')
 parser.add_argument('--lr_bb_fix', dest='lr_bb_fix', action='store_true',
                     help='learning rate fix for big batch lr =  lr0*(batch_size/128)**0.5')
 parser.add_argument('--no-lr_bb_fix', dest='lr_bb_fix', action='store_false',
@@ -79,6 +80,51 @@ parser.add_argument('--resume', default='', type=str, metavar='PATH',
                     help='path to latest checkpoint (default: none)')
 parser.add_argument('-e', '--evaluate', type=str, metavar='FILE',
                     help='evaluate model FILE on validation set')
+
+parser.add_argument('-mb', '--mini-batch-size', default=64, type=int,
+                    help='mini-mini-batch size (default: 64)')
+parser.add_argument('--ghost_batch_size', type=int, default=0,
+                    help='used for ghost batch size')
+# parser.add_argument('--use_pruning', type=bool, default=False,
+#                    help='whether use pruning')
+parser.add_argument('--pruning_perc', default=0.1, type=float,
+                    help='the percent of pruning gradient')
+# parser.add_argument('--use_residue_acc', type=bool, default=False,
+#                     help='whether use pruning')
+
+parser.add_argument('--use_residue_acc', dest='use_residue_acc', action='store_true',
+                    help='use residue accumulating')
+parser.add_argument('--no_use_residue_acc', dest='use_residue_acc', action='store_false',
+                    help='do not use residue accumulating')
+parser.set_defaults(use_residue_acc=False)
+
+parser.add_argument('--use_pruning', dest='use_pruning', action='store_true',
+                    help='use gradient pruning')
+parser.add_argument('--no_use_pruning', dest='use_pruning', action='store_false',
+                    help='do not use gradient pruning')
+parser.set_defaults(use_pruning=False)
+
+parser.add_argument('--use_warmup', dest='use_warmup', action='store_true',
+                    help='use warm up')
+parser.add_argument('--no_use_warmup', dest='use_warmup', action='store_false',
+                    help='do not use warm up')
+parser.set_defaults(use_warmup=False)
+
+parser.add_argument('--use_sync', dest='use_sync', action='store_true',
+                    help='synchronize all parameters every sync_interval steps')
+parser.add_argument('--no_use_sync', dest='use_sync', action='store_false',
+                    help='synchronize all parameters every sync_interval steps')
+parser.set_defaults(use_sync=False)
+
+parser.add_argument('--sync_interval', default=100, type=int,
+                    help='sync interval (default: 100)')
+
+parser.add_argument('--use_debug', dest='use_debug', action='store_true',
+                    help='to debug')
+parser.add_argument('--no_use_debug', dest='use_debug', action='store_false',
+                    help='no debug')
+parser.set_defaults(use_debug=False)
+
 
 
 def main():
@@ -198,14 +244,30 @@ def main():
            for (i, w) in enumerate(list(model.parameters()))})
     init_weights = [w.data.cpu().clone() for w in list(model.parameters())]
 
+    U = [[]]
+    V = [[]]
+    print("USE_RESACC ", args.use_residue_acc, " USE_PRUNING ", args.use_pruning)
+    if args.use_residue_acc:
+        ghost_batch_num = args.batch_size // args.mini_batch_size
+        print('USE PRUNING :', args.pruning_perc * 100, "%")
+        if torch.cuda.is_available():
+            U = [[torch.zeros(w.size()).cuda() for w in list(model.parameters())]
+                    for i in range(ghost_batch_num)]
+            V = [[torch.zeros(w.size()).cuda() for w in list(model.parameters())]
+                    for i in range(ghost_batch_num)]
+        else:
+            print("gpu is not avaiable for U, V allocation")
+
+
+
     for epoch in range(args.start_epoch, args.epochs):
         optimizer = adjust_optimizer(optimizer, epoch, regime)
 
         # train for one epoch
-        train_result = train(train_loader, model, criterion, epoch, optimizer)
+        train_result = train(train_loader, model, criterion, epoch, optimizer, U, V)
 
-        train_loss, train_prec1, train_prec5 = [
-            train_result[r] for r in ['loss', 'prec1', 'prec5']]
+        train_loss, train_prec1, train_prec5, U = [
+            train_result[r] for r in ['loss', 'prec1', 'prec5', 'V']]
 
         # evaluate on validation set
         val_result = validate(val_loader, model, criterion, epoch)
@@ -261,7 +323,7 @@ def main():
         results.save()
 
 
-def forward(data_loader, model, criterion, epoch=0, training=True, optimizer=None):
+def forward(data_loader, model, criterion, epoch=0, training=True, optimizer=None, U=None, V=None):
     if args.gpus and len(args.gpus) > 1:
         model = torch.nn.DataParallel(model, args.gpus)
 
@@ -298,8 +360,19 @@ def forward(data_loader, model, criterion, epoch=0, training=True, optimizer=Non
             mini_inputs = input_var.chunk(args.batch_size // args.mini_batch_size)
             mini_targets = target_var.chunk(args.batch_size // args.mini_batch_size)
 
+            #TODO for debug shoul be delete
+            if(0 == i):
+                print('number of ghost batch is ', len(mini_inputs))
 
             optimizer.zero_grad()
+
+            # fjr simulate distributed senario
+            acc_grad = []
+            if args.use_residue_acc:
+                if torch.cuda.is_available():
+                    acc_grad = [torch.zeros(w.size()).cuda() for w in list(model.parameters())]
+                else:
+                    print("gpu is not avaiable for acc_grad allocation")
 
             for k, mini_input_var in enumerate(mini_inputs):
                 mini_target_var = mini_targets[k]
@@ -312,13 +385,103 @@ def forward(data_loader, model, criterion, epoch=0, training=True, optimizer=Non
                 top5.update(prec5[0], mini_input_var.size(0))
 
                 # compute gradient and do SGD step
+                # fjr
+                if args.use_residue_acc:
+                    # clear grad before accumulating
+                    optimizer.zero_grad()
+
                 loss.backward()
 
-            for p in model.parameters():
-                p.grad.data.div_(len(mini_inputs))
-            clip_grad_norm(model.parameters(), 5.)
-            optimizer.step()
+                if args.use_residue_acc:
+                    if args.use_debug:
+                        # TODO debug print U[k], V[k], grad[k]
+                        print("=======before pruning=========")
+                        for u, v, p in zip(U[k], V[k], model.parameters()):
+                            g_len = 1;
+                            for dim in p.grad.data.size():
+                                g_len *= dim
+                            g_flatten = p.grad.data.view(g_len)
+                            U_flatten = u.view(g_len)
+                            V_flatten = v.view(g_len)
+                            for debugIdx in range(10):
+                                print("node ", k , ",idx ", debugIdx, ",U ", U_flatten[debugIdx],
+                                     ",V ", V_flatten[debugIdx], ",grad ", g_flatten[debugIdx])
+                            break
+                        print("=======end before pruning=========")
 
+                    # clip_grad_norm(model.parameters(), 5. * (len(mini_inputs) ** -0.5))
+                    idx = 0
+                    for u, v, p in zip(U[k], V[k], model.parameters()):
+                        #prune for conv and linear
+                            # DEBUG
+                            #print("before pruning : grad_norm : ", p.grad.data.norm(), "residue ", r.norm())
+                            #pruning change grad and r
+                        if args.use_pruning and len(u.size()) != 1:
+                            # TODO how to set m
+                            u = 0.0 * u + p.grad.data / len(mini_inputs)
+                            v = v + u
+
+                            masks = []
+                            if args.use_sync and i % args.sync_interval == 0:
+                                masks = 1;
+                            else:
+                                if args.use_warmup:
+                                    if (epoch == 0):
+                                        masks = prune_perc(v, 0.25)
+                                    elif (epoch == 1):
+                                        masks = prune_perc(v, 0.125)
+                                    elif (epoch == 2):
+                                        masks = prune_perc(v, 0.0675)
+                                    elif (epoch == 3):
+                                        masks = prune_perc(v, 0.04)
+                                    else:
+                                        masks = prune_perc(v, 0.01)
+                                else:
+                                    masks = prune_perc(v, 0.01)
+
+                            p.grad.data = v * masks
+                            v = v * (1 - masks)
+                            u = u * (1 - masks)
+
+                            # DEBUG
+                            if args.use_debug:
+                                print("after pruning : grad_norm : ", p.grad.data.norm(), "v", v.norm())
+                                print("sparsity of this layer is", check_sparsity(p.grad.data))
+                        #new_residue.append(r)
+                        acc_grad[idx] += p.grad.data
+                        U[k][idx] = u #new_residue
+                        V[k][idx] = v
+                        idx = idx + 1
+                        #print("grad", type(p.grad.data), p.size(), p.grad.data.norm())
+                        #print("res", type(r), r.size(), r.norm())
+
+            if args.use_residue_acc:
+                for g, p in zip(acc_grad, model.parameters()):
+                    # if len(r.size()) != 1:
+                    #     print("accumulated sparsity is", check_sparsity(p.grad.data))
+                    p.grad.data = g #.div_(len(mini_inputs))
+
+                if args.use_debug:
+                    print("=======after pruning=========")
+                    for k in range(len(mini_inputs)):
+                        for u, v, p in zip(U[k], V[k], model.parameters()):
+                            g_len = 1;
+                            for dim in p.grad.data.size():
+                                g_len *= dim
+                            g_flatten = p.grad.data.view(g_len)
+                            U_flatten = u.view(g_len)
+                            V_flatten = v.view(g_len)
+                            for debugIdx in range(10):
+                                print("node ", k , ",idx ", debugIdx, ",U ", U_flatten[debugIdx],
+                                    ",V ", V_flatten[debugIdx], ",grad ", g_flatten[debugIdx])
+                            break
+                    print("=======end after pruning=========")
+            else:
+                for p in model.parameters():
+                    p.grad.data.div_(len(mini_inputs))
+                clip_grad_norm(model.parameters(), 5.)
+
+            optimizer.step()
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -338,21 +501,23 @@ def forward(data_loader, model, criterion, epoch=0, training=True, optimizer=Non
 
     return {'loss': losses.avg,
             'prec1': top1.avg,
-            'prec5': top5.avg}
+            'prec5': top5.avg,
+            'U' : U,
+            'V' : V}
 
 
-def train(data_loader, model, criterion, epoch, optimizer):
+def train(data_loader, model, criterion, epoch, optimizer, U, V):
     # switch to train mode
     model.train()
     return forward(data_loader, model, criterion, epoch,
-                   training=True, optimizer=optimizer)
+                   training=True, optimizer=optimizer, U=U, V=V)
 
 
 def validate(data_loader, model, criterion, epoch):
     # switch to evaluate mode
     model.eval()
     return forward(data_loader, model, criterion, epoch,
-                   training=False, optimizer=None)
+                   training=False, optimizer=None, U=None, V=None)
 
 
 if __name__ == '__main__':

@@ -7,12 +7,13 @@ import pandas as pd
 from bokeh.io import output_file, save, show
 from bokeh.plotting import figure
 from bokeh.layouts import column
-from bokeh.charts import Line, defaults
+#from bokeh.charts import Line, defaults
+#from bkcharts.charts import Line, defaults
 from numpy.random import choice
 
-defaults.width = 800
-defaults.height = 400
-defaults.tools = 'pan,box_zoom,wheel_zoom,box_select,hover,resize,reset,save'
+#defaults.width = 800
+#defaults.height = 400
+#defaults.tools = 'pan,box_zoom,wheel_zoom,box_select,hover,resize,reset,save'
 
 
 def setup_logging(log_file='log.txt'):
@@ -66,8 +67,9 @@ class ResultsLog(object):
             show(plot)
 
     def plot(self, *kargs, **kwargs):
-        line = Line(data=self.results, *kargs, **kwargs)
-        self.figures.append(line)
+        pass
+        #line = Line(data=self.results, *kargs, **kwargs)
+        #self.figures.append(line)
 
     def image(self, *kargs, **kwargs):
         fig = figure()
