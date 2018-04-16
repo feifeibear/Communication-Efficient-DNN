@@ -189,8 +189,12 @@ class ResNet_cifar10(ResNet):
         init_model(self)
 
         self.regime = {
-            # 0: {'optimizer': 'SGD', 'lr':  1e-1,
-            #     'weight_decay': 1e-4, 'momentum': 0.9},
+            # fjr
+            # 0: {'optimizer': 'SGD', 'lr': 1e-1,
+            #    'weight_decay': 1e-4, 'momentum': 0.9},
+            # main.py change momentum
+            # 0: {'optimizer': 'SGD', 'lr':  1e-1, 'weight_decay': 1e-4},
+            # main.py change momentum and weight_decay
             0: {'optimizer': 'SGD', 'lr':  1e-1},
             81: {'lr': 1e-2},
             122: {'lr':  1e-3, 'optimizer': 'SGD'},
@@ -223,6 +227,7 @@ def resnet(**kwargs):
     elif dataset == 'cifar10':
         num_classes = num_classes or 10
         depth = depth or 44
+        print('depth of ResNet_cifar10 ', depth)
         return ResNet_cifar10(num_classes=num_classes,
                               block=BasicBlock, depth=depth)
     elif dataset == 'cifar100':
