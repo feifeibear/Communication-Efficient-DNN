@@ -216,10 +216,12 @@ def main():
     }
     transform = getattr(model, 'input_transform', default_transform)
     regime = getattr(model, 'regime', {0: {'optimizer': args.optimizer,
-                                           'lr': args.lr,
-                                           'momentum': args.momentum,
-                                           'weight_decay': args.weight_decay}})
+                                           'lr': args.lr
+                                           #'momentum': args.momentum,
+                                           #'weight_decay': args.weight_decay
+                                           }})
     adapted_regime = {}
+    logging.info('self-defined momentum : %f, weight_decay : %f', args.momentum, args.weight_decay)
     for e, v in regime.items():
         if args.lr_bb_fix and 'lr' in v:
             # v['lr'] *= (args.batch_size / args.mini_batch_size) ** 0.5
@@ -482,8 +484,8 @@ def forward(data_loader, model, criterion, epoch=0, training=True, optimizer=Non
                     else:
                     # TODO 2. implement weight_decay and momentum by myself, set mom=0 and wd = 0
                     # used with baseline
-                        g += p.data * 1e-4
-                        V[k][idx] = 0.9 * V[k][idx] + g
+                        g += p.data * args.weight_decay
+                        V[k][idx] = args.momentum * V[k][idx] + g
                         p.grad.data = V[k][idx]
                         clip_grad_norm(model.parameters(), 5.)
 
@@ -507,9 +509,9 @@ def forward(data_loader, model, criterion, epoch=0, training=True, optimizer=Non
             else:
                 for p in model.parameters():
                     p.grad.data.div_(len(mini_inputs))
-                print("original grad norm before clip", p.grad.data.norm())
+                #print("original grad norm before clip", p.grad.data.norm())
                 clip_grad_norm(model.parameters(), 5.)
-                print("original grad norm after clip", p.grad.data.norm())
+                #print("original grad norm after clip", p.grad.data.norm())
 
             optimizer.step()
 
