@@ -191,7 +191,7 @@ class ResNet_cifar10(ResNet):
         self.regime = {
             # fjr
             # 0: {'optimizer': 'SGD', 'lr': 1e-1,
-            #    'weight_decay': 1e-4, 'momentum': 0.9},
+            #   'weight_decay': 1e-4, 'momentum': 0.9},
             # main.py change momentum
             # 0: {'optimizer': 'SGD', 'lr':  1e-1, 'weight_decay': 1e-4},
             # main.py change momentum and weight_decay

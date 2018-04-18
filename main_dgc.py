@@ -261,6 +261,8 @@ def main():
     U = [[]]
     V = [[]]
     print("USE_RESACC ", args.use_residue_acc, " USE_PRUNING ", args.use_pruning)
+    print("model ", args.model, " use_nesterov ", args.use_nesterov)
+
     if args.use_residue_acc:
         ghost_batch_num = args.batch_size // args.mini_batch_size
         if torch.cuda.is_available():
@@ -407,7 +409,6 @@ def forward(data_loader, model, criterion, epoch=0, training=True, optimizer=Non
 
                 if args.use_residue_acc:
                     if args.use_debug:
-                        # TODO debug print U[k], V[k], grad[k]
                         print("=======before pruning=========")
                         for u, v, p in zip(U[k], V[k], model.parameters()):
                             g_len = 1;
@@ -442,6 +443,7 @@ def forward(data_loader, model, criterion, epoch=0, training=True, optimizer=Non
                                 masks = 1;
                             else:
                                 if args.use_warmup:
+                                    # print("iter", i, "node ", k, " pruning layer ", idx)
                                     if (epoch == 0):
                                         masks = prune_perc(v, 1 - 0.75)
                                     elif (epoch == 1):
@@ -487,9 +489,9 @@ def forward(data_loader, model, criterion, epoch=0, training=True, optimizer=Non
                         g += p.data * args.weight_decay
                         V[k][idx] = args.momentum * V[k][idx] + g
                         p.grad.data = V[k][idx]
-                        clip_grad_norm(model.parameters(), 5.)
+                        # clip_grad_norm(model.parameters(), 5.)
 
-                    idx += 1
+                    idx = idx+1
 
                 if args.use_debug:
                     print("=======after pruning=========")

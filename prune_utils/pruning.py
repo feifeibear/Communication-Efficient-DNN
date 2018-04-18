@@ -19,6 +19,8 @@ def prune_perc(x, perc):
     if top_k < 1:
         top_k = 1
     _, x_top_idx = torch.topk(x_flatten, top_k, 0, largest=True)
+    #x_top_idx,_ = torch.sort(x_top_idx)
+    #print('nonzero indices are : ', x_top_idx)
     # torch.save(x_top_idx, './tensors/x_top_idx.pt')
 
     # for i in x_top_idx:
@@ -26,7 +28,6 @@ def prune_perc(x, perc):
     #         print("Error in top_k", "idx : ", i, " len : ", x_len)
     # x_top_idx = torch.LongTensor([i for i in range(x_len)]).cuda()
     # print(x_top_val, x_top_idx)
-    # print(x_top_idx)
 
     if torch.cuda.is_available():
         mask = torch.zeros(x_len).cuda()

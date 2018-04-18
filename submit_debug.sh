@@ -1,21 +1,20 @@
 export PATH=/home/fangjr/miniconda3/lib:/home/fangjr/miniconda3/bin:$PATH
 
 export BATCH_SIZE=128
-export MINI_BATCH_SIZE=32
-export USE_PRUNING=use_pruning
+export MINI_BATCH_SIZE=128
+export USE_PRUNING=no_use_pruning
 export USE_RESIDUE_ACC=use_residue_acc
 export USE_WARMUP=use_warmup
 export USE_SYNC=no_use_sync
-export MODEL_NAME=mobilenetv2 #resnet
-export RESNET_DEPTH=44
+export MODEL_NAME=resnet
+export RESNET_DEPTH=44 #44
 export LRSCALE=lr_bb_fix
 # a Vanilla SGD, useless because py in models decides mom
 export MOMENTUM=0.9
-export WEIGHTDECAY=0.0001
-export USE_NES=use_nesterov
+export WEIGHTDECAY=1e-4
 
 python3 main_dgc.py \
-  --gpus 2,5 \
+  --gpus 2,4 \
   --dataset cifar10 \
   --resnet_depth=${RESNET_DEPTH} \
   --model ${MODEL_NAME} \
@@ -25,12 +24,11 @@ python3 main_dgc.py \
   --momentum=${MOMENTUM} \
   --weight-decay=${WEIGHTDECAY} \
   --${USE_RESIDUE_ACC} \
-  --${USE_NES} \
   --${USE_PRUNING} \
   --${USE_WARMUP} \
   --${USE_SYNC} \
   --${LRSCALE} \
-  --save dgc_cifar10_${MODEL_NAME}${RESNET_DEPTH}_${BATCH_SIZE}_${MINI_BATCH_SIZE}_${USE_PRUNING}_${USE_RESIDUE_ACC}_${USE_WARMUP}_${USE_SYNC}_${USE_NES}_fixedUVbug_selfwd
+  --save debug
 
 #--use_pruning ${USE_PRUNING}
 #--use_residue_acc ${USE_RESIDUE_ACC}
