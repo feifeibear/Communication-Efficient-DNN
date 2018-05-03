@@ -20,6 +20,7 @@ from ast import literal_eval
 from torch.nn.utils import clip_grad_norm
 from math import ceil
 from math import sqrt
+from math import log
 import numpy as np
 from prune_utils.pruning import prune_perc, check_sparsity
 
@@ -127,13 +128,18 @@ parser.add_argument('--no_use_nesterov', dest='use_nesterov', action='store_fals
                     help='no debug')
 parser.set_defaults(use_nesterov=False)
 
-
-
 parser.add_argument('--use_debug', dest='use_debug', action='store_true',
                     help='to debug')
 parser.add_argument('--no_use_debug', dest='use_debug', action='store_false',
                     help='no debug')
 parser.set_defaults(use_debug=False)
+
+parser.add_argument('--use_delayed_sgd', dest='use_delayed_sgd', action='store_true',
+                    help='to use delayed_sgd')
+parser.add_argument('--no_use_delayed_sgd', dest='no_use_delayed_sgd', action='store_false',
+                    help='no delayed_sgd')
+parser.set_defaults(use_delayed_sgd=False)
+
 
 
 
@@ -168,15 +174,21 @@ def main():
     else:
         args.gpus = None
 
-    # create model
+    # fjr : create N model
     logging.info("creating model %s", args.model)
-    model = models.__dict__[args.model]
+    node_num = args.batch_size // args.mini_batch_size
+    model = [ models.__dict__[args.model] for i in range(node_num)]
+
     model_config = {'input_size': args.input_size, 'dataset': args.dataset, 'depth': args.resnet_depth}
 
     if args.model_config is not '':
         model_config = dict(model_config, **literal_eval(args.model_config))
 
-    model = model(**model_config)
+    # fjr to N models
+    # model = model(**model_config)
+    for i in range(len(model)):
+        # TODO can we call model in this way?
+        model[i] = model[i](**model_config)
     logging.info("created model with configuration: %s", model_config)
 
     # optionally resume from a checkpoint
@@ -184,6 +196,7 @@ def main():
         if not os.path.isfile(args.evaluate):
             parser.error('invalid checkpoint: {}'.format(args.evaluate))
         checkpoint = torch.load(args.evaluate)
+        #TODO
         model.load_state_dict(checkpoint['state_dict'])
         logging.info("loaded checkpoint '%s' (epoch %s)",
                      args.evaluate, checkpoint['epoch'])
@@ -198,13 +211,15 @@ def main():
             checkpoint = torch.load(checkpoint_file)
             args.start_epoch = checkpoint['epoch'] + 1
             best_prec1 = checkpoint['best_prec1']
+            #TODO
             model.load_state_dict(checkpoint['state_dict'])
             logging.info("loaded checkpoint '%s' (epoch %s)",
                          checkpoint_file, checkpoint['epoch'])
         else:
             logging.error("no checkpoint found at '%s'", args.resume)
 
-    num_parameters = sum([l.nelement() for l in model.parameters()])
+    # add index 0
+    num_parameters = sum([l.nelement() for l in model[0].parameters()])
     logging.info("number of parameters: %d", num_parameters)
 
     # Data loading code
@@ -214,8 +229,11 @@ def main():
         'eval': get_transform(args.dataset,
                               input_size=args.input_size, augment=False)
     }
-    transform = getattr(model, 'input_transform', default_transform)
-    regime = getattr(model, 'regime', {0: {'optimizer': args.optimizer,
+
+    # we fetch some properties from model,so just use model[0] 
+    # fjr add index 0
+    transform = getattr(model[0], 'input_transform', default_transform)
+    regime = getattr(model[0], 'regime', {0: {'optimizer': args.optimizer,
                                            'lr': args.lr
                                            #'momentum': args.momentum,
                                            #'weight_decay': args.weight_decay
@@ -232,9 +250,13 @@ def main():
     regime = adapted_regime
 
     # define loss function (criterion) and optimizer
-    criterion = getattr(model, 'criterion', nn.CrossEntropyLoss)()
+    # fjr add index = 0
+    criterion = getattr(model[0], 'criterion', nn.CrossEntropyLoss)()
     criterion.type(args.type)
-    model.type(args.type)
+
+    #fjr
+    for i in range(len(model)):
+        model[i].type(args.type)
 
     val_data = get_dataset(args.dataset, 'val', transform['eval'])
     val_loader = torch.utils.data.DataLoader(
@@ -243,6 +265,7 @@ def main():
         num_workers=args.workers, pin_memory=True)
 
     if args.evaluate:
+        #fjr print results of each model
         validate(val_loader, model, criterion, 0)
         return
 
@@ -252,37 +275,61 @@ def main():
         batch_size=args.batch_size, shuffle=True,
         num_workers=args.workers, pin_memory=True)
 
-    optimizer = torch.optim.SGD(model.parameters(), lr=args.lr)
+    # add N optimizer
+    optimizer = [torch.optim.SGD(model[i].parameters(), lr=args.lr) for i in range(len(model))]
     logging.info('training regime: %s', regime)
     print({i: list(w.size())
-           for (i, w) in enumerate(list(model.parameters()))})
-    init_weights = [w.data.cpu().clone() for w in list(model.parameters())]
+           for (i, w) in enumerate(list(model[0].parameters()))})
+    #TODO
+    init_weights = [w.data.cpu().clone() for w in list(model[0].parameters())]
 
     U = [[]]
     V = [[]]
+    PARAMS_MTX = [[]]
     print("USE_RESACC ", args.use_residue_acc, " USE_PRUNING ", args.use_pruning)
     print("model ", args.model, " use_nesterov ", args.use_nesterov)
 
+    ghost_batch_num = args.batch_size // args.mini_batch_size
     if args.use_residue_acc:
-        ghost_batch_num = args.batch_size // args.mini_batch_size
         if torch.cuda.is_available():
-            U = [[torch.zeros(w.size()).cuda() for w in list(model.parameters())]
+            U = [[torch.zeros(w.size()).cuda() for w in list(model[i].parameters())]
                     for i in range(ghost_batch_num)]
-            V = [[torch.zeros(w.size()).cuda() for w in list(model.parameters())]
+            V = [[torch.zeros(w.size()).cuda() for w in list(model[i].parameters())]
                     for i in range(ghost_batch_num)]
         else:
             print("gpu is not avaiable for U, V allocation")
+    # fjrcomm.
+    # TODO no init
+    # PARAMS_MTX = [[[model[i].parameters()]
+    PARAMS_MTX = [[[torch.zeros(w.size()).cuda() for w in list(model[i].parameters())]
+                    for i in range(ghost_batch_num)]
+                     for j in range(ghost_batch_num)]
 
-
+    groups = []
+    lgN = int(log(ghost_batch_num, 2))
+    # prepare comm. grooup
+    for i in range(lgN):
+        visited = [False for ii in range(ghost_batch_num)]
+        group = []
+        for j in range(ghost_batch_num):
+            if(visited[j] == False):
+                group.append((j, j + 2**i))
+                visited[j] = True
+                visited[j + 2**i] = True
+        groups.append(group)
+    print("Comm. Pairs is as follows")
+    print(groups)
+    timestamp_Mtx = np.zeros((ghost_batch_num, ghost_batch_num)) - 1
 
     for epoch in range(args.start_epoch, args.epochs):
-        optimizer = adjust_optimizer(optimizer, epoch, regime)
+        for i in range(len(optimizer)):
+            optimizer[i] = adjust_optimizer(optimizer[i], epoch, regime)
 
         # train for one epoch
-        train_result = train(train_loader, model, criterion, epoch, optimizer, U, V)
+        train_result = train(train_loader, model, criterion, epoch, optimizer, U, V, PARAMS_MTX, groups, timestamp_Mtx)
 
-        train_loss, train_prec1, train_prec5, U, V = [
-            train_result[r] for r in ['loss', 'prec1', 'prec5', 'U', 'V']]
+        train_loss, train_prec1, train_prec5, U, V, PARAMS_MTX, timestamp_Mtx = [
+            train_result[r] for r in ['loss', 'prec1', 'prec5', 'U', 'V', 'PARAMS_MTX', 'timestamp_Mtx']]
 
         # evaluate on validation set
         val_result = validate(val_loader, model, criterion, epoch)
@@ -296,7 +343,8 @@ def main():
             'epoch': epoch + 1,
             'model': args.model,
             'config': args.model_config,
-            'state_dict': model.state_dict(),
+            #fjr TODO
+            'state_dict': model[0].state_dict(),
             'best_prec1': best_prec1,
             'regime': regime
         }, is_best, path=save_path)
@@ -314,8 +362,9 @@ def main():
         #Enable to measure more layers
         idxs = [0]#,2,4,6,7,8,9,10]#[0, 12, 45, 63]
 
+        # TODO
         step_dist_epoch = {'step_dist_n%s' % k: (w.data.cpu() - init_weights[k]).norm()
-                           for (k, w) in enumerate(list(model.parameters())) if k in idxs}
+                           for (k, w) in enumerate(list(model[0].parameters())) if k in idxs}
 
 
         results.add(epoch=epoch + 1, train_loss=train_loss, val_loss=val_loss,
@@ -338,9 +387,11 @@ def main():
         results.save()
 
 
-def forward(data_loader, model, criterion, epoch=0, training=True, optimizer=None, U=None, V=None):
+def forward(data_loader, model, criterion, epoch=0, training=True, optimizer=None, U=None, V=None, PARAMS_MTX=None, groups=None, timestamp_Mtx=None):
     if args.gpus and len(args.gpus) > 1:
-        model = torch.nn.DataParallel(model, args.gpus)
+        # fjr
+        for i in range(len(model)):
+            model[i] = torch.nn.DataParallel(model[i], args.gpus)
 
     batch_time = AverageMeter()
     data_time = AverageMeter()
@@ -349,7 +400,6 @@ def forward(data_loader, model, criterion, epoch=0, training=True, optimizer=Non
     top5 = AverageMeter()
 
     end = time.time()
-
 
     for i, (inputs, target) in enumerate(data_loader):
         # measure data loading time
@@ -361,7 +411,9 @@ def forward(data_loader, model, criterion, epoch=0, training=True, optimizer=Non
 
         # compute output
         if not training:
-            output = model(input_var)
+            # TODO only node 0's weight is used to evaluate test data
+            # should we average the losses or sum lossess?
+            output = model[0](input_var)
             loss = criterion(output, target_var)
 
             # measure accuracy and record loss
@@ -375,148 +427,93 @@ def forward(data_loader, model, criterion, epoch=0, training=True, optimizer=Non
             mini_inputs = input_var.chunk(args.batch_size // args.mini_batch_size)
             mini_targets = target_var.chunk(args.batch_size // args.mini_batch_size)
 
-            #TODO for debug shoul be delete
+            #TODO for debug should be delete
             if(0 == i):
                 print('number of ghost batch is ', len(mini_inputs))
 
-            optimizer.zero_grad()
+            # fjr
+            for k in range(len(model)):
+                optimizer[k].zero_grad()
 
-            # fjr simulate distributed senario
+            # fjr simulate distributed senario, acc_grad should be a N*N matrix,
+            # each elem is parameters of the model
             acc_grad = []
-            if args.use_residue_acc:
-                if torch.cuda.is_available():
-                    acc_grad = [torch.zeros(w.size()).cuda() for w in list(model.parameters())]
-                else:
-                    print("gpu is not avaiable for acc_grad allocation")
-
             for k, mini_input_var in enumerate(mini_inputs):
+                #print('debug in one it ', k)
                 mini_target_var = mini_targets[k]
-                output = model(mini_input_var)
+                output = model[k](mini_input_var)
                 loss = criterion(output, mini_target_var)
+                #print('debug in one it 1 ', k)
 
-                prec1, prec5 = accuracy(output.data, mini_target_var.data, topk=(1, 5))
-                losses.update(loss.data[0], mini_input_var.size(0))
-                top1.update(prec1[0], mini_input_var.size(0))
-                top5.update(prec5[0], mini_input_var.size(0))
+                #TODO update k = 0
+                if(0 == k):
+                    prec1, prec5 = accuracy(output.data, mini_target_var.data, topk=(1, 5))
+                    losses.update(loss.data[0], mini_input_var.size(0))
+                    top1.update(prec1[0], mini_input_var.size(0))
+                    top5.update(prec5[0], mini_input_var.size(0))
 
                 # compute gradient and do SGD step
-                # fjr
-                if args.use_residue_acc:
-                    # clear grad before accumulating
-                    optimizer.zero_grad()
-
                 loss.backward()
+            # end for k
 
-                if args.use_residue_acc:
-                    if args.use_debug:
-                        print("=======before pruning=========")
-                        for u, v, p in zip(U[k], V[k], model.parameters()):
-                            g_len = 1;
-                            for dim in p.grad.data.size():
-                                g_len *= dim
-                            g_flatten = p.grad.data.view(g_len)
-                            U_flatten = u.view(g_len)
-                            V_flatten = v.view(g_len)
-                            for debugIdx in range(10):
-                                print("node ", k , ",idx ", debugIdx, ",U ", U_flatten[debugIdx],
-                                     ",V ", V_flatten[debugIdx], ",grad ", g_flatten[debugIdx])
-                            break
-                        print("=======end before pruning=========")
+            # a independent version
+            # fjr comm.
+            N = len(model)
+            lgN = int(log(N,2))
 
-                    if args.use_pruning:
-                        clip_grad_norm(model.parameters(), 5. * (len(mini_inputs) ** -0.5))
+            if args.use_delayed_sgd:
+                for k in range(N):
+                    timestamp_Mtx[k][k] += 1
+                    for l, p in enumerate(list(model[k].parameters())):
+                        PARAMS_MTX[k][k][l] = p.grad.data
 
-                    idx = 0
-                    for u, v, p in zip(U[k], V[k], model.parameters()):
-                        if args.use_pruning:
-                            # TODO how to set rho (momentum)
-                            g = p.grad.data / len(mini_inputs)
-                            g += p.data * args.weight_decay / len(mini_inputs)
-                            if args.use_nesterov:
-                                u = args.momentum * (u + g)
-                                v = v + u + g
-                            else:
-                                u = args.momentum * u + g
-                                v = v + u
+                # print(timestamp_Mtx)
 
-                            masks = []
-                            if args.use_sync and i % args.sync_interval == 0:
-                                masks = 1;
-                            else:
-                                if args.use_warmup:
-                                    # print("iter", i, "node ", k, " pruning layer ", idx)
-                                    if (epoch == 0):
-                                        masks = prune_perc(v, 1 - 0.75)
-                                    elif (epoch == 1):
-                                        masks = prune_perc(v, 1 - 0.9375)
-                                    elif (epoch == 2):
-                                        masks = prune_perc(v, 1 - 0.984375)
-                                    elif (epoch == 3):
-                                        masks = prune_perc(v, 1 - 0.996)
-                                    else:
-                                        masks = prune_perc(v, 1 - 0.999)
-                                else:
-                                    masks = prune_perc(v, 1 - 0.999)
+                # for k in range(N):
+                #     optimizer[k].zero_grad()
 
-                            p.grad.data = v * masks
-                            v = v * (1 - masks)
-                            u = u * (1 - masks)
+                # debug_PARAMS_MTX_norm = [[0 for i in range(N)] for j in range(N)]
+                # for row in range(N):
+                #     for col in range(N):
+                #         debug_PARAMS_MTX_norm[row][col] = PARAMS_MTX[row][col][0].norm()
+                # print(debug_PARAMS_MTX_norm)
 
-                            # DEBUG
-                            if args.use_debug:
-                                print("after pruning : grad_norm : ", p.grad.data.norm(), "v", v.norm())
-                                print("sparsity of this layer is", check_sparsity(p.grad.data))
-
-                            acc_grad[idx] += p.grad.data
-                            U[k][idx] = u #new_residue
-                            V[k][idx] = v
+                # update values
+                step = i % lgN
+                for g in groups[step]:
+                    idx_left = g[0]
+                    idx_right = g[1]
+                    for row in range(N):
+                        if(timestamp_Mtx[row][idx_left] < timestamp_Mtx[row][idx_right]):
+                            # right -> left
+                            PARAMS_MTX[row][idx_left] = PARAMS_MTX[row][idx_right]
                         else:
-                            acc_grad[idx] += p.grad.data / len(mini_inputs)
-
-                        idx = idx + 1
-
-            if args.use_residue_acc:
-                # Master
-                idx = 0
-                for g, p in zip(acc_grad, model.parameters()):
-                    # print("accumulated sparsity is", check_sparsity(g))
-                    if args.use_pruning:
-                    # TODO 1. use pytorch sgd optimizer to calculate mom and weight_decay, set mom and wd
-                    # used with pruning
-                        p.grad.data = g
-                    else:
-                    # TODO 2. implement weight_decay and momentum by myself, set mom=0 and wd = 0
-                    # used with baseline
-                        g += p.data * args.weight_decay
-                        V[k][idx] = args.momentum * V[k][idx] + g
-                        p.grad.data = V[k][idx]
-                        # clip_grad_norm(model.parameters(), 5.)
-
-                    idx = idx+1
-
-                if args.use_debug:
-                    print("=======after pruning=========")
-                    for k in range(len(mini_inputs)):
-                        for u, v, p in zip(U[k], V[k], model.parameters()):
-                            g_len = 1;
-                            for dim in p.grad.data.size():
-                                g_len *= dim
-                            g_flatten = p.grad.data.view(g_len)
-                            U_flatten = u.view(g_len)
-                            V_flatten = v.view(g_len)
-                            for debugIdx in range(10):
-                                print("node ", k , ",idx ", debugIdx, ",U ", U_flatten[debugIdx],
-                                    ",V ", V_flatten[debugIdx], ",grad ", g_flatten[debugIdx])
-                            break
-                    print("=======end after pruning=========")
+                            # right <- left
+                            PARAMS_MTX[row][idx_right] = PARAMS_MTX[row][idx_left]
+                        timestamp_Mtx[row][idx_left] = timestamp_Mtx[row][idx_right] = \
+                    max(timestamp_Mtx[row][idx_left], timestamp_Mtx[row][idx_right])
             else:
-                for p in model.parameters():
-                    p.grad.data.div_(len(mini_inputs))
-                #print("original grad norm before clip", p.grad.data.norm())
-                clip_grad_norm(model.parameters(), 5.)
-                #print("original grad norm after clip", p.grad.data.norm())
+                # Sync SGD
+                for col in range(N):
+                    for row in range(N):
+                        for l, p in enumerate(list(model[row].parameters())):
+                            PARAMS_MTX[row][col][l] = p.grad.data
 
-            optimizer.step()
+            # average column to model
+            for col in range(N):
+                for p in list(model[col].parameters()):
+                    p.grad.data = torch.zeros(p.grad.data.size()).cuda()
+                for row in range(N):
+                    for l, p1 in enumerate(list(model[col].parameters())):
+                    #p.grad.data = torch.zeros(p.grad.data.size()).cuda()
+                        p1.grad.data += PARAMS_MTX[row][col][l]
+                for p in list(model[col].parameters()):
+                    p.grad.data.div_(N)
+                clip_grad_norm(model[col].parameters(), 5.)
+
+            # SGD on model
+            for k in range(len(optimizer)):
+                optimizer[k].step()
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -538,21 +535,26 @@ def forward(data_loader, model, criterion, epoch=0, training=True, optimizer=Non
             'prec1': top1.avg,
             'prec5': top5.avg,
             'U' : U,
-            'V' : V}
+            'V' : V,
+            'PARAMS_MTX' : PARAMS_MTX,
+            'timestamp_Mtx' : timestamp_Mtx}
 
 
-def train(data_loader, model, criterion, epoch, optimizer, U, V):
+def train(data_loader, model, criterion, epoch, optimizer, U, V, PARAMS_MTX, groups, timestamp_Mtx):
     # switch to train mode
-    model.train()
+    for i in range(len(model)):
+        model[i].train()
     return forward(data_loader, model, criterion, epoch,
-                   training=True, optimizer=optimizer, U=U, V=V)
+                   training=True, optimizer=optimizer, U=U, V=V,
+                   PARAMS_MTX=PARAMS_MTX, groups=groups, timestamp_Mtx=timestamp_Mtx)
 
 
 def validate(data_loader, model, criterion, epoch):
     # switch to evaluate mode
-    model.eval()
+    for i in range(len(model)):
+        model[i].eval()
     return forward(data_loader, model, criterion, epoch,
-                   training=False, optimizer=None, U=None, V=None)
+                   training=False, optimizer=None, U=None, V=None, PARAMS_MTX=None, groups=None, timestamp_Mtx=None)
 
 
 if __name__ == '__main__':
