@@ -280,7 +280,7 @@ def main():
     logging.info('training regime: %s', regime)
     print({i: list(w.size())
            for (i, w) in enumerate(list(model[0].parameters()))})
-    #TODO
+    #TODO check diff models' init_weights is identical?
     init_weights = [w.data.cpu().clone() for w in list(model[0].parameters())]
 
     U = [[]]
@@ -389,7 +389,7 @@ def main():
 
 def forward(data_loader, model, criterion, epoch=0, training=True, optimizer=None, U=None, V=None, PARAMS_MTX=None, groups=None, timestamp_Mtx=None):
     if args.gpus and len(args.gpus) > 1:
-        # fjr
+        # fjr TODO we can not do data parallel right for seperate models
         for i in range(len(model)):
             model[i] = torch.nn.DataParallel(model[i], args.gpus)
 
@@ -423,7 +423,6 @@ def forward(data_loader, model, criterion, epoch=0, training=True, optimizer=Non
             top5.update(prec5[0], input_var.size(0))
 
         else:
-
             mini_inputs = input_var.chunk(args.batch_size // args.mini_batch_size)
             mini_targets = target_var.chunk(args.batch_size // args.mini_batch_size)
 
@@ -437,7 +436,6 @@ def forward(data_loader, model, criterion, epoch=0, training=True, optimizer=Non
 
             # fjr simulate distributed senario, acc_grad should be a N*N matrix,
             # each elem is parameters of the model
-            acc_grad = []
             for k, mini_input_var in enumerate(mini_inputs):
                 #print('debug in one it ', k)
                 mini_target_var = mini_targets[k]
@@ -454,18 +452,18 @@ def forward(data_loader, model, criterion, epoch=0, training=True, optimizer=Non
 
                 # compute gradient and do SGD step
                 loss.backward()
-            # end for k
+            # end for k, mini_input_var in enumerate(mini_inputs):
 
             # a independent version
             # fjr comm.
             N = len(model)
-            lgN = int(log(N,2))
 
             if args.use_delayed_sgd:
+                lgN = int(log(N,2))
                 for k in range(N):
                     timestamp_Mtx[k][k] += 1
                     for l, p in enumerate(list(model[k].parameters())):
-                        PARAMS_MTX[k][k][l] = p.grad.data
+                        PARAMS_MTX[k][k][l] = p.grad.data.clone()
 
                 # print(timestamp_Mtx)
 
@@ -484,12 +482,15 @@ def forward(data_loader, model, criterion, epoch=0, training=True, optimizer=Non
                     idx_left = g[0]
                     idx_right = g[1]
                     for row in range(N):
+                        # TODO copy
                         if(timestamp_Mtx[row][idx_left] < timestamp_Mtx[row][idx_right]):
                             # right -> left
-                            PARAMS_MTX[row][idx_left] = PARAMS_MTX[row][idx_right]
+                            for l in range(len(PARAMS_MTX[row][idx_left])):
+                                PARAMS_MTX[row][idx_left][l] = PARAMS_MTX[row][idx_right][l].clone()
                         else:
                             # right <- left
-                            PARAMS_MTX[row][idx_right] = PARAMS_MTX[row][idx_left]
+                            for l in range(len(PARAMS_MTX[row][idx_left])):
+                                PARAMS_MTX[row][idx_right][l] = PARAMS_MTX[row][idx_left][l].clone()
                         timestamp_Mtx[row][idx_left] = timestamp_Mtx[row][idx_right] = \
                     max(timestamp_Mtx[row][idx_left], timestamp_Mtx[row][idx_right])
             else:
@@ -497,21 +498,23 @@ def forward(data_loader, model, criterion, epoch=0, training=True, optimizer=Non
                 for col in range(N):
                     for row in range(N):
                         for l, p in enumerate(list(model[row].parameters())):
-                            PARAMS_MTX[row][col][l] = p.grad.data
+                            #TODO clone?
+                            PARAMS_MTX[row][col][l] = p.grad.data.clone()
 
             # average column to model
             for col in range(N):
-                for p in list(model[col].parameters()):
-                    p.grad.data = torch.zeros(p.grad.data.size()).cuda()
-                for row in range(N):
-                    for l, p1 in enumerate(list(model[col].parameters())):
-                    #p.grad.data = torch.zeros(p.grad.data.size()).cuda()
-                        p1.grad.data += PARAMS_MTX[row][col][l]
-                for p in list(model[col].parameters()):
-                    p.grad.data.div_(N)
+                for l, p in enumerate(list(model[col].parameters())):
+                    p.grad.data.zero_()
+                    for row in range(N):
+                        p.grad.data += PARAMS_MTX[row][col][l] / N
                 clip_grad_norm(model[col].parameters(), 5.)
 
-            # SGD on model
+            # debug_PARAMS_MTX_norm = [[0 for i in range(N)] for j in range(N)]
+            # for row in range(N):
+            #     for col in range(N):
+            #         debug_PARAMS_MTX_norm[row][col] = PARAMS_MTX[row][col][0].norm()
+            # print(debug_PARAMS_MTX_norm)
+
             for k in range(len(optimizer)):
                 optimizer[k].step()
 
