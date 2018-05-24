@@ -21,7 +21,7 @@ from torch.nn.utils import clip_grad_norm
 from math import ceil
 from math import sqrt
 import numpy as np
-from prune_utils.pruning import select_top_k, check_sparsity
+from prune_utils.pruning import prune_perc, check_sparsity, struct_pruning
 
 model_names = sorted(name for name in models.__dict__
                      if name.islower() and not name.startswith("__")
@@ -127,6 +127,11 @@ parser.add_argument('--no_use_nesterov', dest='use_nesterov', action='store_fals
                     help='no debug')
 parser.set_defaults(use_nesterov=False)
 
+parser.add_argument('--use_struct_pruning', dest='use_struct_pruning', action='store_true',
+                    help='to debug')
+parser.add_argument('--no_use_struct_pruning', dest='use_struct_pruning', action='store_false',
+                    help='no debug')
+parser.set_defaults(use_struct_pruning=False)
 
 
 parser.add_argument('--use_debug', dest='use_debug', action='store_true',
@@ -134,6 +139,8 @@ parser.add_argument('--use_debug', dest='use_debug', action='store_true',
 parser.add_argument('--no_use_debug', dest='use_debug', action='store_false',
                     help='no debug')
 parser.set_defaults(use_debug=False)
+
+parser.add_argument('--lr_scale', default=1.0, type=float, help='learning rate scale')
 
 
 
@@ -225,7 +232,7 @@ def main():
     for e, v in regime.items():
         if args.lr_bb_fix and 'lr' in v:
             # v['lr'] *= (args.batch_size / args.mini_batch_size) ** 0.5
-            v['lr'] *= (args.batch_size / 128) ** 0.5
+            v['lr'] *= (args.batch_size / 128) ** 0.5 * args.lr_scale
         if args.regime_bb_fix:
             e *= ceil(args.batch_size / args.mini_batch_size)
         adapted_regime[e] = v
@@ -274,15 +281,20 @@ def main():
             print("gpu is not avaiable for U, V allocation")
 
 
+    offset = []
+    if args.use_struct_pruning:
+        offset = [0 for l in list(model.parameters())]
+
+
 
     for epoch in range(args.start_epoch, args.epochs):
         optimizer = adjust_optimizer(optimizer, epoch, regime)
 
         # train for one epoch
-        train_result = train(train_loader, model, criterion, epoch, optimizer, U, V)
+        train_result = train(train_loader, model, criterion, epoch, optimizer, U, V, offset)
 
-        train_loss, train_prec1, train_prec5, U, V = [
-            train_result[r] for r in ['loss', 'prec1', 'prec5', 'U', 'V']]
+        train_loss, train_prec1, train_prec5, U, V, offset = [
+            train_result[r] for r in ['loss', 'prec1', 'prec5', 'U', 'V', 'offset']]
 
         # evaluate on validation set
         val_result = validate(val_loader, model, criterion, epoch)
@@ -338,21 +350,17 @@ def main():
         results.save()
 
 
-def forward(data_loader, model, criterion, epoch=0, training=True, optimizer=None, U=None, V=None):
+def forward(data_loader, model, criterion, epoch=0, training=True, optimizer=None, U=None, V=None, offset=None):
     if args.gpus and len(args.gpus) > 1:
         model = torch.nn.DataParallel(model, args.gpus)
 
     batch_time = AverageMeter()
-    pruning_time = AverageMeter()
-    select_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
     top1 = AverageMeter()
     top5 = AverageMeter()
 
     end = time.time()
-
-    masks = [torch.zeros(w.size()).cuda() for w in list(model.parameters())]
 
 
     for i, (inputs, target) in enumerate(data_loader):
@@ -412,12 +420,26 @@ def forward(data_loader, model, criterion, epoch=0, training=True, optimizer=Non
                 loss.backward()
 
                 if args.use_residue_acc:
+                    if args.use_debug:
+                        print("=======before pruning=========")
+                        for u, v, p in zip(U[k], V[k], model.parameters()):
+                            g_len = 1;
+                            for dim in p.grad.data.size():
+                                g_len *= dim
+                            g_flatten = p.grad.data.view(g_len)
+                            U_flatten = u.view(g_len)
+                            V_flatten = v.view(g_len)
+                            for debugIdx in range(10):
+                                print("node ", k , ",idx ", debugIdx, ",U ", U_flatten[debugIdx],
+                                     ",V ", V_flatten[debugIdx], ",grad ", g_flatten[debugIdx])
+                            break
+                        print("=======end before pruning=========")
+
                     if args.use_pruning:
                         clip_grad_norm(model.parameters(), 5. * (len(mini_inputs) ** -0.5))
 
                     idx = 0
                     for u, v, p in zip(U[k], V[k], model.parameters()):
-                        prune_begin = time.time()
                         if args.use_pruning:
                             # TODO how to set rho (momentum)
                             g = p.grad.data / len(mini_inputs)
@@ -429,38 +451,88 @@ def forward(data_loader, model, criterion, epoch=0, training=True, optimizer=Non
                                 u = args.momentum * u + g
                                 v = v + u
 
-                            select_begin = time.time()
+                            masks = []
                             if args.use_sync and i % args.sync_interval == 0:
-                                masks[idx] = 1;
+                                masks = 1;
                             else:
-                                if args.use_warmup:
-                                    # print("iter", i, "node ", k, " pruning layer ", idx)
-                                    if (epoch == 0):
-                                        masks[idx] = select_top_k(v, 1 - 0.75, masks[idx])
-                                    elif (epoch == 1):
-                                        masks[idx] = select_top_k(v, 1 - 0.9375, masks[idx])
-                                    elif (epoch == 2):
-                                        masks[idx] = select_top_k(v, 1 - 0.984375, masks[idx])
-                                    elif (epoch == 3):
-                                        masks[idx] = select_top_k(v, 1 - 0.996, masks[idx])
+                                if args.use_struct_pruning:
+                                    ratio = 0.0
+                                    if (np.prod(v.size()) > 128):
+                                        if args.use_warmup:
+                                            # print("iter", i, "node ", k, " pruning layer ", idx)
+                                            if (epoch == 0):
+                                                ratio = 1 - 0.50
+                                                masks = struct_pruning(v, ratio, offset[idx])
+                                            elif (epoch == 1):
+                                                ratio = 1 - 0.60
+                                                masks = struct_pruning(v, ratio, offset[idx])
+                                            elif (epoch == 2):
+                                                ratio = 1 - 0.70
+                                                masks = struct_pruning(v, ratio, offset[idx])
+                                            elif (epoch == 3):
+                                                ratio = 1 - 0.80
+                                                masks = struct_pruning(v, ratio, offset[idx])
+                                            else:
+                                                ratio = args.pruning_perc
+                                                masks = struct_pruning(v, ratio, offset[idx])
+                                        else:
+                                            ratio = args.pruning_perc 
+                                            masks = struct_pruning(v, ratio, offset[idx])
                                     else:
-                                        masks[idx] = select_top_k(v, 1 - 0.999, masks[idx])
+                                        masks = 1.0
+
+                                    x_len = np.prod(v.size())
+                                    slice_size = int(x_len * ratio) + 1
+                                    if offset[idx] + slice_size > x_len:
+                                        offset[idx] = slice_size - (x_len - offset[idx])
+                                    else:
+                                        offset[idx] += slice_size
+
                                 else:
-                                    masks[idx] = select_top_k(v, 1 - 0.999, masks[idx])
-                            select_time.update(time.time() - select_begin)
+                                    if args.use_warmup:
+                                        # print("iter", i, "node ", k, " pruning layer ", idx)
+                                        if (epoch == 0):
+                                            masks = prune_perc(v, 1 - 0.75)
+                                            print("v norm", v.norm())
+                                            print("top 25% norm ", (v * masks).norm())
+                                            print("remain 75% norm ", (v * (1-masks)).norm())
+                                        elif (epoch == 1):
+                                            masks = prune_perc(v, 1 - 0.9375)
+                                            print("v norm", v.norm())
+                                            print("top 7.25% norm ", (v * masks).norm())
+                                            print("remain 93.75% norm ",(v * (1-masks)).norm())
+                                        elif (epoch == 2):
+                                            masks = prune_perc(v, 1 - 0.984375)
+                                            print("v norm", v.norm())
+                                            print("top 1.5625% norm ", (v * masks).norm())
+                                            print("remain 98.43% norm ", (v * (1-masks)).norm())
+                                        elif (epoch == 3):
+                                            masks = prune_perc(v, 1 - 0.996)
+                                            print("v norm", v.norm())
+                                            print("top 0.004% norm ", (v * masks).norm())
+                                            print("remain 99.6% norm ", (v * (1-masks)).norm())
+                                        else:
+                                            masks = prune_perc(v, 1 - 0.999)
+                                            print("v norm", v.norm())
+                                            print("top 0.001% norm ", (v * masks).norm())
+                                            print("remain 99.9% norm ", (v * (1-masks)).norm())
+                                    else:
+                                        masks = prune_perc(v, 1 - 0.999)
 
+                            p.grad.data = v * masks
+                            v = v * (1 - masks)
+                            u = u * (1 - masks)
 
-                            p.grad.data = v * masks[idx]
-                            v = v * (1 - masks[idx])
-                            u = u * (1 - masks[idx])
+                            # DEBUG
+                            if args.use_debug:
+                                print("after pruning : grad_norm : ", p.grad.data.norm(), "v", v.norm())
+                                print("sparsity of this layer is", check_sparsity(p.grad.data))
 
                             acc_grad[idx] += p.grad.data
                             U[k][idx] = u #new_residue
                             V[k][idx] = v
                         else:
                             acc_grad[idx] += p.grad.data / len(mini_inputs)
-
-                        pruning_time.update(time.time() - prune_begin)
 
                         idx = idx + 1
 
@@ -483,6 +555,21 @@ def forward(data_loader, model, criterion, epoch=0, training=True, optimizer=Non
 
                     idx = idx+1
 
+                if args.use_debug:
+                    print("=======after pruning=========")
+                    for k in range(len(mini_inputs)):
+                        for u, v, p in zip(U[k], V[k], model.parameters()):
+                            g_len = 1;
+                            for dim in p.grad.data.size():
+                                g_len *= dim
+                            g_flatten = p.grad.data.view(g_len)
+                            U_flatten = u.view(g_len)
+                            V_flatten = v.view(g_len)
+                            for debugIdx in range(10):
+                                print("node ", k , ",idx ", debugIdx, ",U ", U_flatten[debugIdx],
+                                    ",V ", V_flatten[debugIdx], ",grad ", g_flatten[debugIdx])
+                            break
+                    print("=======end after pruning=========")
             else:
                 for p in model.parameters():
                     p.grad.data.div_(len(mini_inputs))
@@ -500,38 +587,34 @@ def forward(data_loader, model, criterion, epoch=0, training=True, optimizer=Non
             logging.info('{phase} - Epoch: [{0}][{1}/{2}]\t'
                          'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                          'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
-                         'Prune {pruning_time.val:.9f} ({pruning_time.avg:.3f})\t'
-                         'Select {select_time.val:.9f} ({select_time.avg:.3f})\t'
                          'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
                          'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'
                          'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
                              epoch, i, len(data_loader),
                              phase='TRAINING' if training else 'EVALUATING',
                              batch_time=batch_time,
-                             data_time=data_time,
-                             pruning_time = pruning_time,
-                             select_time = select_time,
-                             loss=losses, top1=top1, top5=top5))
+                             data_time=data_time, loss=losses, top1=top1, top5=top5))
 
     return {'loss': losses.avg,
             'prec1': top1.avg,
             'prec5': top5.avg,
             'U' : U,
-            'V' : V}
+            'V' : V,
+            'offset' : offset}
 
 
-def train(data_loader, model, criterion, epoch, optimizer, U, V):
+def train(data_loader, model, criterion, epoch, optimizer, U, V, offset):
     # switch to train mode
     model.train()
     return forward(data_loader, model, criterion, epoch,
-                   training=True, optimizer=optimizer, U=U, V=V)
+                   training=True, optimizer=optimizer, U=U, V=V, offset=offset)
 
 
 def validate(data_loader, model, criterion, epoch):
     # switch to evaluate mode
     model.eval()
     return forward(data_loader, model, criterion, epoch,
-                   training=False, optimizer=None, U=None, V=None)
+                   training=False, optimizer=None, U=None, V=None, offset=None)
 
 
 if __name__ == '__main__':
