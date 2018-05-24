@@ -509,28 +509,29 @@ def forward(data_loader, model, criterion, epoch=0, training=True, optimizer=Non
 
             optimizer.step()
 
-        # measure elapsed time
-        batch_time.update(time.time() - end)
-        end = time.time()
+            # measure elapsed time
+            batch_time.update(time.time() - end)
+            end = time.time()
 
-        if i % args.print_freq == 0:
-            logging.info('{phase} - Epoch: [{0}][{1}/{2}]\t'
-                         'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-                         'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
-                         'Prune {pruning_time.val:.9f} ({pruning_time.avg:.3f})\t'
-                         'Select {select_time.val:.9f} ({select_time.avg:.3f})\t'
-                         'Communication {comm_time.val:.9f} ({comm_time.avg:.3f})\t'
-                         'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                         'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'
-                         'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
-                             epoch, i, len(data_loader),
-                             phase='TRAINING' if training else 'EVALUATING',
-                             batch_time=batch_time,
-                             data_time=data_time,
-                             pruning_time = pruning_time,
-                             select_time = select_time,
-                             comm_time = comm_time,
-                             loss=losses, top1=top1, top5=top5))
+            if i % args.print_freq == 0:
+                if hvd.local_rank() == 0:
+                    logging.info('{phase} - Epoch: [{0}][{1}/{2}]\t'
+                                 'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                                 'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
+                                 'Prune {pruning_time.val:.9f} ({pruning_time.avg:.3f})\t'
+                                 'Select {select_time.val:.9f} ({select_time.avg:.3f})\t'
+                                 'Communication {comm_time.val:.9f} ({comm_time.avg:.3f})\t'
+                                 'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
+                                 'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'
+                                 'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
+                                     epoch, i, len(data_loader),
+                                     phase='TRAINING' if training else 'EVALUATING',
+                                     batch_time=batch_time,
+                                     data_time=data_time,
+                                     pruning_time = pruning_time,
+                                     select_time = select_time,
+                                     comm_time = comm_time,
+                                 loss=losses, top1=top1, top5=top5))
 
     return {'loss': losses.avg,
             'prec1': top1.avg,
