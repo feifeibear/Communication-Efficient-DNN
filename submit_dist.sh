@@ -8,6 +8,7 @@ export USE_SYNC=no_use_sync
 export MODEL_NAME=resnet
 #export MODEL_NAME=mobilenetv2 #resnet
 export RESNET_DEPTH=44
+export PRINTFREQ=44
 export LRSCALE=lr_bb_fix
 # a Vanilla SGD, useless because py in models decides mom
 export MOMENTUM=0.9
@@ -23,6 +24,7 @@ mpirun -np 2 python3 ./main_dist_dgc.py \
   --epochs 41 \
   --b ${BATCH_SIZE} \
   --momentum=${MOMENTUM} \
+  --print-freq 10 \
   --weight-decay=${WEIGHTDECAY} \
   --${USE_RESIDUE_ACC} \
   --${USE_NES} \
